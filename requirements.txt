@@ -1,0 +1,5 @@
+discord.py
+yt-dlp
+g4f
+python-dotenv
+flask
