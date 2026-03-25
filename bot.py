@@ -5,8 +5,8 @@ import os
 import io
 import asyncio
 import logging
+import re
 from google import genai
-from google.genai import types
 from flask import Flask
 from threading import Thread
 from waitress import serve
@@ -17,10 +17,9 @@ logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
 app = Flask(__name__)
 @app.route('/')
-def health(): return "System Status: Online", 200
+def health(): return "Architect System: Online", 200
 
-# --- 2. GOOGLE GENAI CLIENT SETUP ---
-# It automatically looks for GEMINI_API_KEY in environment variables
+# --- 2. GENAI CLIENT ---
 client = genai.Client()
 
 class CodeWeaver(commands.Bot):
@@ -35,67 +34,87 @@ class CodeWeaver(commands.Bot):
 
 bot = CodeWeaver()
 
-# --- 3. AI LOGIC FUNCTIONS ---
+# --- 3. HELPER: CODE TO FILE EXTRACTOR ---
+def extract_code_to_files(text):
+    """Detects code blocks and prepares Discord Files."""
+    # Pattern to find ```language \n code ```
+    regex = r"```(\w+)\n([\s\S]*?)```"
+    matches = re.findall(regex, text)
+    files = []
+    
+    extensions = {
+        "python": "py", "py": "py",
+        "javascript": "js", "js": "js", "node": "js",
+        "java": "java",
+        "html": "html",
+        "css": "css",
+        "typescript": "ts", "ts": "ts",
+        "c++": "cpp", "cpp": "cpp",
+        "csharp": "cs", "cs": "cs"
+    }
 
-async def get_gemini_chat(prompt):
+    for i, (lang, code) in enumerate(matches):
+        ext = extensions.get(lang.lower(), "txt")
+        filename = f"script_{i+1}.{ext}"
+        
+        # Create a file-like object in memory
+        stream = io.BytesIO(code.encode('utf-8'))
+        files.append(File(fp=stream, filename=filename))
+        
+    return files
+
+# --- 4. CORE AI LOGIC ---
+
+async def handle_ai_request(msg_obj, prompt, is_dm=False):
     try:
-        # Using the new SDK generate_content method
         response = await asyncio.to_thread(
             client.models.generate_content,
             model="gemini-3-flash-preview",
             contents=prompt
         )
-        return response.text[:1950]
-    except Exception as e:
-        return f"⚠️ Chat Error: {str(e)}"
-
-async def get_gemini_image(prompt):
-    try:
-        # Using the new SDK for image generation
-        response = await asyncio.to_thread(
-            client.models.generate_content,
-            model="gemini-3.1-flash-image-preview",
-            contents=[prompt]
-        )
+        full_text = response.text
         
-        for part in response.parts:
-            if part.inline_data is not None:
-                # Convert the part to an image and save to buffer
-                image = part.as_image()
-                img_byte_arr = io.BytesIO()
-                image.save(img_byte_arr, format='PNG')
-                img_byte_arr.seek(0)
-                return img_byte_arr
-        return None
+        # Extract files if code exists
+        code_files = extract_code_to_files(full_text)
+        
+        # Clean text: remove long code blocks from the message to keep it readable
+        clean_text = re.sub(r"```[\s\S]*?```", "*(Code extracted to file below)*", full_text)
+        
+        if is_dm:
+            await msg_obj.author.send(clean_text[:1900], files=code_files)
+        else:
+            await msg_obj.followup.send(clean_text[:1900], files=code_files)
+
     except Exception as e:
-        print(f"Image Error: {e}")
-        return None
+        err = f"⚠️ System Error: {str(e)}"
+        if is_dm: await msg_obj.author.send(err)
+        else: await msg_obj.followup.send(err)
 
-# --- 4. SLASH COMMANDS ---
+# --- 5. COMMANDS ---
 
-@bot.tree.command(name="chat", description="Chat with Gemini 3 Flash")
+@bot.tree.command(name="chat", description="AI Coding Assistant (Generates Files)")
 async def chat(itx: Interaction, message: str):
     await itx.response.defer()
-    reply = await get_gemini_chat(message)
-    await itx.followup.send(f"♊ **AI:** {reply}")
+    await handle_ai_request(itx, message)
 
-@bot.tree.command(name="image", description="Generate image with Gemini 3.1")
+@bot.tree.command(name="image", description="Generate high-end images")
 async def image(itx: Interaction, prompt: str):
     await itx.response.defer()
-    img_buffer = await get_gemini_image(prompt)
-    if img_buffer:
-        file = File(fp=img_buffer, filename="gemini_gen.png")
-        await itx.followup.send(content=f"🎨 **Generated:** `{prompt}`", file=file)
-    else:
-        await itx.followup.send("❌ Failed to generate image. Check your API permissions.")
+    try:
+        res = await asyncio.to_thread(client.models.generate_content, 
+                                     model="gemini-3.1-flash-image-preview", contents=[prompt])
+        for part in res.parts:
+            if part.inline_data:
+                img = part.as_image()
+                buf = io.BytesIO()
+                img.save(buf, format='PNG')
+                buf.seek(0)
+                return await itx.followup.send(file=File(fp=buf, filename="gen.png"))
+        await itx.followup.send("❌ No image data returned.")
+    except Exception as e:
+        await itx.followup.send(f"⚠️ Image Error: {e}")
 
-@bot.tree.command(name="clear", description="Clear channel messages")
-@app_commands.checks.has_permissions(manage_messages=True)
-async def clear(itx: Interaction, amount: int):
-    await itx.channel.purge(limit=amount)
-    await itx.response.send_message(f"🧹 Cleared {amount} messages.", ephemeral=True)
-
-# --- 5. SMART DM HANDLER ---
+# --- 6. SMART DM LISTENER ---
 
 @bot.event
 async def on_message(msg):
@@ -104,32 +123,31 @@ async def on_message(msg):
     if isinstance(msg.channel, discord.DMChannel):
         async with msg.channel.typing():
             content = msg.content.lower()
-            if any(k in content for k in ["draw", "image", "generate", "art"]):
-                img_buffer = await get_gemini_image(msg.content)
-                if img_buffer:
-                    await msg.author.send(file=File(fp=img_buffer, filename="dm_art.png"))
-                else:
-                    await msg.author.send("⚠️ Image generation failed.")
-            else:
-                reply = await get_gemini_chat(msg.content)
-                await msg.author.send(f"🤖 **DM AI:** {reply}")
+            # If user asks for an image
+            if any(k in content for k in ["draw", "image", "art"]):
+                # Image logic for DMs
+                try:
+                    res = await asyncio.to_thread(client.models.generate_content, 
+                                                 model="gemini-3.1-flash-image-preview", contents=[msg.content])
+                    for part in res.parts:
+                        if part.inline_data:
+                            img = part.as_image()
+                            buf = io.BytesIO()
+                            img.save(buf, format='PNG')
+                            buf.seek(0)
+                            return await msg.author.send(file=File(fp=buf, filename="dm_gen.png"))
+                except: pass
+            
+            # Default: Chat + Code File Extraction
+            await handle_ai_request(msg, msg.content, is_dm=True)
 
     await bot.process_commands(msg)
 
-# --- 6. EXECUTION ---
+# --- 7. STARTUP ---
 
 def run_web():
-    port = int(os.environ.get("PORT", 8080))
-    serve(app, host='0.0.0.0', port=port, _quiet=True)
-
-@bot.event
-async def on_ready():
-    print(f"✅ Code Weaver V11 [New SDK] Online as: {bot.user}")
+    serve(app, host='0.0.0.0', port=int(os.environ.get("PORT", 8080)), _quiet=True)
 
 if __name__ == "__main__":
-    TOKEN = os.environ.get("DISCORD_TOKEN")
-    if not TOKEN or not os.environ.get("GEMINI_API_KEY"):
-        print("❌ ERROR: Tokens missing in environment variables!")
-    else:
-        Thread(target=run_web, daemon=True).start()
-        bot.run(TOKEN)
+    Thread(target=run_web, daemon=True).start()
+    bot.run(os.environ.get("DISCORD_TOKEN"))
