@@ -1,5 +1,4 @@
 discord.py
-g4f
 google-generativeai
 flask
 python-dotenv
