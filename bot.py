@@ -1,104 +1,129 @@
 import discord
 from discord.ext import commands
 from discord import app_commands, Interaction, File
-import os, io, asyncio, logging, requests
+import os
+import io
+import asyncio
+import requests
+import logging
 import google.generativeai as genai
 from flask import Flask
 from threading import Thread
 from waitress import serve
 
-# --- 1. SILENT PRODUCTION SETUP ---
+# --- 1. SILENT PRODUCTION SERVER ---
 logging.getLogger('waitress').setLevel(logging.ERROR)
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
+os.environ['WERKZEUG_RUN_MAIN'] = 'true'
+
 app = Flask(__name__)
 @app.route('/')
-def health(): return "Omni-System Online", 200
+def health(): return "Code Weaver V11: Online", 200
 
-# --- 2. CONFIGURATION ---
+# --- 2. BOT CONFIGURATION ---
 TOKEN = os.environ.get("DISCORD_TOKEN")
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
 
+# Configure Gemini
 genai.configure(api_key=GEMINI_KEY)
 chat_model = genai.GenerativeModel('gemini-1.5-flash')
-img_model = genai.GenerativeModel('imagen-3.0-generate-001') # Ensure API access
 
-class OmniBot(commands.Bot):
+class CodeWeaver(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         intents.message_content = True
+        intents.members = True
         super().__init__(command_prefix="!", intents=intents, help_command=None)
 
     async def setup_hook(self):
         await self.tree.sync()
 
-bot = OmniBot()
+bot = CodeWeaver()
 
-# --- 3. CORE AI FUNCTIONS ---
-async def get_text(prompt):
+# --- 3. CORE LOGIC FUNCTIONS ---
+
+async def get_ai_chat(prompt):
     try:
         response = await asyncio.to_thread(chat_model.generate_content, prompt)
-        return response.text[:1900]
-    except: return "⚠️ Chat engine busy."
+        return response.text[:1950]
+    except Exception as e:
+        return f"⚠️ Chat Error: {str(e)}"
 
-async def get_image(prompt):
+async def get_ai_image(prompt):
     try:
-        response = await asyncio.to_thread(img_model.generate_content, prompt)
-        if response.candidates[0].content.parts[0].inline_data:
-            return io.BytesIO(response.candidates[0].content.parts[0].inline_data.data)
-    except:
-        # Fallback to high-speed public API if Gemini key lacks Imagen permission
-        url = f"https://image.pollinations.ai/prompt/{prompt.replace(' ', '%20')}?nologo=true"
-        return io.BytesIO(requests.get(url).content)
+        # Using a reliable image generation API that Discord can embed immediately
+        encoded_prompt = prompt.replace(" ", "%20")
+        url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?nologo=true&width=1024&height=1024"
+        
+        # Download the actual image bytes
+        response = await asyncio.to_thread(requests.get, url, timeout=15)
+        if response.status_code == 200:
+            return io.BytesIO(response.content)
+        return None
+    except Exception:
+        return None
 
-# --- 4. SLASH COMMANDS (The "All-In-One" List) ---
+# --- 4. SLASH COMMANDS ---
 
-@bot.tree.command(name="chat", description="Chat with Gemini AI")
-async def chat_cmd(itx: Interaction, message: str):
+@bot.tree.command(name="chat", description="Chat with Gemini Pro AI")
+async def chat(itx: Interaction, message: str):
     await itx.response.defer()
-    await itx.followup.send(f"♊ **AI:** {await get_text(message)}")
+    reply = await get_ai_chat(message)
+    await itx.followup.send(f"♊ **AI:** {reply}")
 
-@bot.tree.command(name="image", description="Generate high-quality AI art")
-async def image_cmd(itx: Interaction, prompt: str):
+@bot.tree.command(name="image", description="Generate a visible AI image")
+async def image(itx: Interaction, prompt: str):
     await itx.response.defer()
-    buf = await get_image(prompt)
-    await itx.followup.send(file=File(fp=buf, filename="art.png"))
+    img_buffer = await get_ai_image(prompt)
+    if img_buffer:
+        file = File(fp=img_buffer, filename="weaver_art.png")
+        await itx.followup.send(content=f"🎨 **Prompt:** `{prompt}`", file=file)
+    else:
+        await itx.followup.send("❌ Failed to generate image.")
 
-@bot.tree.command(name="clear", description="Purge messages")
+@bot.tree.command(name="clear", description="Purge messages from channel")
 @app_commands.checks.has_permissions(manage_messages=True)
-async def clear_cmd(itx: Interaction, amount: int):
+async def clear(itx: Interaction, amount: int):
     await itx.channel.purge(limit=amount)
-    await itx.response.send_message(f"🧹 Purged {amount} messages.", ephemeral=True)
+    await itx.response.send_message(f"🧹 Cleared {amount} messages.", ephemeral=True)
 
-@bot.tree.command(name="help", description="Show all commands")
-async def help_cmd(itx: Interaction):
-    embed = discord.Embed(title="Omni-Bot V11 | Commands", color=0x2ecc71)
-    embed.add_field(name="/chat [msg]", value="Talk to Gemini Pro", inline=False)
-    embed.add_field(name="/image [prompt]", value="Generate Imagen-3 Art", inline=False)
-    embed.add_field(name="/clear [num]", value="Delete messages (Admin)", inline=False)
-    embed.add_field(name="DM Mode", value="Send me a message or 'draw [prompt]' in DMs!", inline=False)
-    await itx.response.send_message(embed=embed)
+# --- 5. SMART DM HANDLER ---
 
-# --- 5. SMART DM & MESSAGE HANDLER ---
 @bot.event
 async def on_message(msg):
-    if msg.author == bot.user: return
+    if msg.author == bot.user:
+        return
 
-    # If it's a DM, handle automatically
+    # Handle Private Messages (DMs)
     if isinstance(msg.channel, discord.DMChannel):
         async with msg.channel.typing():
-            if any(k in msg.content.lower() for k in ["draw", "image", "art"]):
-                buf = await get_image(msg.content)
-                await msg.author.send(file=File(fp=buf, filename="dm_art.png"))
+            content = msg.content.lower()
+            # If user asks to draw or generate in DM
+            if any(word in content for word in ["draw", "image", "generate", "art"]):
+                img_buffer = await get_ai_image(msg.content)
+                if img_buffer:
+                    await msg.author.send(file=File(fp=img_buffer, filename="dm_art.png"))
+                else:
+                    await msg.author.send("⚠️ I couldn't generate that image.")
             else:
-                await msg.author.send(await get_text(msg.content))
-    
+                reply = await get_ai_chat(msg.content)
+                await msg.author.send(f"🤖 **DM AI:** {reply}")
+
     await bot.process_commands(msg)
 
-# --- 6. EXECUTION ---
-def run_web(): serve(app, host='0.0.0.0', port=int(os.environ.get("PORT", 8080)), _quiet=True)
+# --- 6. STARTUP ---
+
+def run_web():
+    port = int(os.environ.get("PORT", 8080))
+    serve(app, host='0.0.0.0', port=port, _quiet=True)
+
+@bot.event
+async def on_ready():
+    print(f"✅ Code Weaver V11 Online | Logged in as: {bot.user}")
 
 if __name__ == "__main__":
-    Thread(target=run_web, daemon=True).start()
-    if TOKEN:
-        print("💎 Omni-Bot Online. All commands synced.")
+    if not TOKEN or not GEMINI_KEY:
+        print("❌ CRITICAL ERROR: DISCORD_TOKEN or GEMINI_API_KEY is missing!")
+    else:
+        Thread(target=run_web, daemon=True).start()
         bot.run(TOKEN)
