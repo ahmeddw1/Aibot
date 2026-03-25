@@ -6,10 +6,10 @@ import io
 import asyncio
 import requests
 import logging
+import google.generativeai as genai
 from flask import Flask
 from threading import Thread
 from waitress import serve
-import g4f
 
 # --- SILENCE WEB LOGS ---
 logging.getLogger('waitress').setLevel(logging.ERROR)
@@ -17,9 +17,19 @@ logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
 app = Flask(__name__)
 @app.route('/')
-def health(): return "Online", 200
+def health(): return "System Status: Online", 200
 
+# --- CONFIGURATION ---
 TOKEN = os.environ.get("DISCORD_TOKEN")
+GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
+
+# Setup Gemini
+genai.configure(api_key=GEMINI_KEY)
+# Using 'gemini-1.5-flash' for text and 'imagen-3' (if available in your region) for images
+text_model = genai.GenerativeModel('gemini-1.5-flash')
+# Note: Gemini's image generation is usually handled via the 'imagen' model 
+# which may require specific project permissions. 
+# We will use the official generation flow.
 
 class CodeWeaver(commands.Bot):
     def __init__(self):
@@ -32,51 +42,53 @@ class CodeWeaver(commands.Bot):
 
 bot = CodeWeaver()
 
-# --- AI TEXT LOGIC ---
-async def get_ai_response(content):
+# --- GEMINI AI LOGIC ---
+async def get_gemini_text(prompt):
     try:
-        res = await asyncio.to_thread(g4f.ChatCompletion.create, 
-            model=g4f.models.gpt_4, 
-            messages=[{"role": "user", "content": content}])
-        return str(res)[:1950]
-    except: return "⚠️ AI Text Engine busy."
+        response = await asyncio.to_thread(text_model.generate_content, prompt)
+        return response.text[:1950]
+    except Exception as e:
+        return f"⚠️ Gemini Text Error: {str(e)}"
 
-# --- IMAGE GENERATION LOGIC ---
-# This uses a poll of free providers to generate the actual image file
-async def get_ai_image(prompt):
+async def get_gemini_image(prompt):
+    """
+    Note: Direct Imagen-3 access via the Gemini API varies by region/tier.
+    This structure uses the Google generative AI flow.
+    """
     try:
-        # We use g4f's image provider or a stable fallback
-        response = await asyncio.to_thread(g4f.ChatCompletion.create,
-            model=g4f.models.gpt_4, # Some providers in g4f support image out
-            messages=[{"role": "user", "content": prompt}],
-            image=True) 
-        return response # This usually returns a URL
-    except:
-        # Fallback to a direct Pollination/Stable Diffusion API if g4f image fails
-        return f"https://image.pollinations.ai/prompt/{prompt.replace(' ', '%20')}?width=1024&height=1024&nologo=true"
+        # We call the generation model. 
+        # If your API key has Imagen access, this will return image data.
+        model = genai.GenerativeModel('imagen-3') # Or 'google/imagen-3-001'
+        result = await asyncio.to_thread(model.generate_content, prompt)
+        
+        # Extract the image bytes from the response
+        image_bytes = result.candidates[0].content.parts[0].inline_data.data
+        return io.BytesIO(image_bytes)
+    except Exception:
+        # Fallback to a high-quality API if Imagen is restricted on your specific key
+        fallback_url = f"https://image.pollinations.ai/prompt/{prompt.replace(' ', '%20')}?nologo=true"
+        img_data = requests.get(fallback_url).content
+        return io.BytesIO(img_data)
 
 # --- COMMANDS ---
-@bot.tree.command(name="chat", description="AI Chat")
+@bot.tree.command(name="chat", description="Chat with Gemini AI")
 async def chat(itx: Interaction, message: str):
     await itx.response.defer()
-    await itx.followup.send(f"💻 **AI:** {await get_ai_response(message)}")
+    response = await get_gemini_text(message)
+    await itx.followup.send(f"♊ **Gemini:** {response}")
 
-@bot.tree.command(name="image", description="Generate Image (Nano Banana Style)")
+@bot.tree.command(name="image", description="Generate Image via Gemini")
 async def image(itx: Interaction, prompt: str):
     await itx.response.defer()
-    img_url = await get_ai_image(prompt)
-    
-    # Download the image to send as a real file
-    img_data = requests.get(img_url).content
-    with io.BytesIO(img_data) as img_file:
-        file = File(fp=img_file, filename="nano_banana.png")
-        await itx.followup.send(content=f"🎨 **Prompt:** `{prompt}`", file=file)
+    img_buffer = await get_gemini_image(prompt)
+    file = File(fp=img_buffer, filename="gemini_art.png")
+    await itx.followup.send(content=f"🎨 **Prompt:** `{prompt}`", file=file)
 
-@bot.tree.command(name="clear", description="Clear chat")
+@bot.tree.command(name="clear", description="Clear messages")
 @app_commands.checks.has_permissions(manage_messages=True)
 async def clear(itx: Interaction, amount: int):
     await itx.channel.purge(limit=amount)
-    await itx.response.send_message(f"🧹 Done.", ephemeral=True)
+    await itx.response.send_message(f"🧹 Cleared {amount} messages.", ephemeral=True)
 
 # --- DM SUPPORT ---
 @bot.event
@@ -84,19 +96,22 @@ async def on_message(msg):
     if msg.author == bot.user: return
     if isinstance(msg.channel, discord.DMChannel):
         async with msg.channel.typing():
-            # Auto-detect if they want an image in DMs
-            if "draw" in msg.content.lower() or "image" in msg.content.lower():
-                url = await get_ai_image(msg.content)
-                img_data = requests.get(url).content
-                with io.BytesIO(img_data) as f:
-                    await msg.author.send(file=File(f, "dm_art.png"))
+            content = msg.content.lower()
+            # If they ask for an image/drawing in DM
+            if any(word in content for word in ["draw", "image", "generate", "art"]):
+                img_buffer = await get_gemini_image(msg.content)
+                await msg.author.send(file=File(fp=img_buffer, filename="dm_art.png"))
             else:
-                await msg.author.send(await get_ai_response(msg.content))
+                response = await get_gemini_text(msg.content)
+                await msg.author.send(f"♊ **Gemini DM:** {response}")
 
-# --- PRODUCTION START ---
+# --- RAILWAY STARTUP ---
 def run_web():
-    serve(app, host='0.0.0.0', port=int(os.environ.get("PORT", 8080)), _quiet=True)
+    port = int(os.environ.get("PORT", 8080))
+    serve(app, host='0.0.0.0', port=port, _quiet=True)
 
 if __name__ == "__main__":
     Thread(target=run_web, daemon=True).start()
-    bot.run(TOKEN)
+    if TOKEN:
+        print("💎 Code Weaver V11 [Gemini Edition] Online.")
+        bot.run(TOKEN)
