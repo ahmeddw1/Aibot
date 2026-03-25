@@ -3,24 +3,21 @@ from discord.ext import commands
 import os
 import asyncio
 import logging
-import yt_dlp
-import g4f
 from flask import Flask
 from threading import Thread
+from waitress import serve  # Production Server
 
-# 1. COMPLETELY SILENCE ALL WEB LOGS
-# This removes the "WARNING", "Running on all addresses", and "IP" lines
-log = logging.getLogger('werkzeug')
-log.setLevel(logging.ERROR)
-os.environ['WERKZEUG_RUN_MAIN'] = 'true'
+# 1. TOTAL SILENCE - Disable all web logging
+logging.getLogger('waitress').setLevel(logging.ERROR)
+logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
 app = Flask(__name__)
 
 @app.route('/')
-def health_check():
-    return "OK", 200
+def health():
+    return "VIP System Active", 200
 
-# 2. BOT CORE
+# 2. BOT ENGINE
 TOKEN = os.environ.get("DISCORD_TOKEN")
 
 class CodeWeaver(commands.Bot):
@@ -31,61 +28,41 @@ class CodeWeaver(commands.Bot):
 
     async def setup_hook(self):
         await self.tree.sync()
-        print("💎 VIP System: Slash Commands Synced.")
 
 bot = CodeWeaver()
 
-# --- AI COMMAND ---
+# --- CHAT & MUSIC COMMANDS ---
 @bot.tree.command(name="chat", description="AI Coding Support")
 async def chat(itx: discord.Interaction, message: str):
     await itx.response.defer()
-    try:
-        response = await asyncio.to_thread(g4f.ChatCompletion.create, 
-            model=g4f.models.gpt_4, 
-            messages=[{"role": "user", "content": message}])
-        await itx.followup.send(f"💻 **AI:**\n{str(response)[:1900]}")
-    except:
-        await itx.followup.send("⚠️ AI Engine Busy.")
+    import g4f
+    res = await asyncio.to_thread(g4f.ChatCompletion.create, model=g4f.models.gpt_4, messages=[{"role":"user","content":message}])
+    await itx.followup.send(f"💻 **AI:** {str(res)[:1900]}")
 
-# --- MUSIC COMMAND ---
 @bot.tree.command(name="play", description="Play Music")
 async def play(itx: discord.Interaction, query: str):
     await itx.response.defer()
-    if not itx.user.voice: return await itx.followup.send("Join VC first!")
+    import yt_dlp
+    if not itx.user.voice: return await itx.followup.send("Join VC!")
     vc = itx.guild.voice_client or await itx.user.voice.channel.connect()
-    
-    ydl_opts = {'format': 'bestaudio/best', 'noplaylist': True, 'quiet': True}
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+    with yt_dlp.YoutubeDL({'format':'bestaudio','quiet':True}) as ydl:
         info = ydl.extract_info(f"ytsearch:{query}", download=False)['entries'][0]
-        url = info['url']
-    
     if vc.is_playing(): vc.stop()
-    vc.play(discord.FFmpegPCMAudio(url, before_options="-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5", options="-vn"))
+    vc.play(discord.FFmpegPCMAudio(info['url'], before_options="-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5", options="-vn"))
     await itx.followup.send(f"🎶 Playing: **{info['title']}**")
 
-# --- CLEAR COMMAND ---
-@bot.tree.command(name="clear", description="Clear messages")
-async def clear(itx: discord.Interaction, amount: int):
-    if itx.user.guild_permissions.manage_messages:
-        await itx.channel.purge(limit=amount)
-        await itx.response.send_message(f"🧹 Cleared {amount} messages.", ephemeral=True)
-    else:
-        await itx.response.send_message("❌ No Permission.", ephemeral=True)
-
-# 3. THE ULTIMATE STARTUP FIX
-def start_server():
-    # Railway passes the PORT env; we use it and stay silent
+# 3. PRODUCTION STARTUP (No Warnings, No IPs)
+def run_production_server():
     port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+    # 'serve' from waitress is the production way to do this
+    serve(app, host='0.0.0.0', port=port, _quiet=True)
 
 if __name__ == "__main__":
     if not TOKEN:
-        print("❌ CRITICAL: DISCORD_TOKEN is missing in Railway Variables!")
+        print("❌ ERROR: Missing DISCORD_TOKEN")
     else:
-        # Start the web server in a separate background thread
-        # This keeps Railway happy without blocking the bot
-        Thread(target=start_server, daemon=True).start()
+        # Start production server silently in background
+        Thread(target=run_production_server, daemon=True).start()
         
-        print("🚀 Code Weaver V11: Booting Discord Core...")
-        # Start the bot in the main thread
+        print("💎 Code Weaver V11: System Online.")
         bot.run(TOKEN)
