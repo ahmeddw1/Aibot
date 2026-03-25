@@ -1,6 +1,6 @@
 discord.py
-google-genai
+g4f
 flask
 python-dotenv
 waitress
-Pillow
+requests
