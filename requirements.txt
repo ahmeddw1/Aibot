@@ -3,3 +3,4 @@ g4f
 flask
 python-dotenv
 waitress
+requests
