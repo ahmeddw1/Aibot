@@ -1,6 +1,6 @@
 import discord
 from discord.ext import commands
-from discord import app_commands, Interaction
+from discord import app_commands, Interaction, File
 import os
 import asyncio
 import logging
@@ -27,7 +27,7 @@ class CodeWeaver(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         intents.message_content = True  # Required for DM and Channel Reading
-        intents.members = True
+        intents.members = True          # Required for some member-related ops, good to have
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
@@ -35,12 +35,12 @@ class CodeWeaver(commands.Bot):
 
 bot = CodeWeaver()
 
-# --- HELPER: AI RESPONSE ---
-async def get_ai_response(content):
+# --- HELPER: AI TEXT RESPONSE ---
+async def get_ai_text_response(content):
     try:
         response = await asyncio.to_thread(
             g4f.ChatCompletion.create,
-            model=g4f.models.gpt_4,
+            model=g4f.models.gpt_4, # Using GPT-4 equivalent for chat
             messages=[
                 {"role": "system", "content": "You are an elite AI assistant. Stay concise and helpful."},
                 {"role": "user", "content": content}
@@ -48,54 +48,31 @@ async def get_ai_response(content):
         )
         return str(response)[:1950]
     except Exception:
-        return "⚠️ The AI engine is currently processing other requests. Please try again in a moment."
+        return "⚠️ The AI text engine is busy. Please try again."
 
-# --- COMMAND: CHAT (Public Channel) ---
-@bot.tree.command(name="chat", description="Ask the AI anything in this channel")
-async def chat(itx: Interaction, message: str):
-    await itx.response.defer()
-    answer = await get_ai_response(message)
-    await itx.followup.send(f"💻 **AI Response:**\n{answer}")
+# --- HELPER: AI IMAGE GENERATION (Placeholder) ---
+# NOTE: g4f doesn't directly support image generation.
+# For actual image generation, you'd integrate with a service like DALL-E, Stable Diffusion API, etc.
+# This function is a placeholder that simulates image generation.
+async def generate_ai_image(prompt):
+    try:
+        # In a real scenario, you'd make an API call here.
+        # Example with a hypothetical DALL-E 3 integration:
+        # client = OpenAI(api_key="YOUR_OPENAI_API_KEY")
+        # response = client.images.generate(model="dall-e-3", prompt=prompt, n=1, size="1024x1024")
+        # image_url = response.data[0].url
+        # download_image_to_file(image_url, "generated_image.png") # function to download from URL
 
-# --- COMMAND: CLEAR ---
-@bot.tree.command(name="clear", description="Delete a specified number of messages")
-@app_commands.checks.has_permissions(manage_messages=True)
-async def clear(itx: Interaction, amount: int):
-    await itx.response.defer(ephemeral=True)
-    deleted = await itx.channel.purge(limit=amount)
-    await itx.followup.send(f"✅ Successfully cleared {len(deleted)} messages.")
-
-# --- FEATURE: DM AI CHAT ---
-@bot.event
-async def on_message(message):
-    # Ignore bot's own messages
-    if message.author == bot.user:
-        return
-
-    # Check if the message is a Private Message (DM)
-    if isinstance(message.channel, discord.DMChannel):
-        async with message.channel.typing():
-            answer = await get_ai_response(message.content)
-            await message.author.send(f"🤖 **Private AI Assistant:**\n{answer}")
-
-    await bot.process_commands(message)
-
-# --- STARTUP LOGIC ---
-def run_production_server():
-    port = int(os.environ.get("PORT", 8080))
-    # Production server (Waitress) is silent and warning-free
-    serve(app, host='0.0.0.0', port=port, _quiet=True)
-
-@bot.event
-async def on_ready():
-    print(f"💎 Code Weaver V11: Logged in as {bot.user}")
-    print("🚀 All systems online. Console is clear.")
-
-if __name__ == "__main__":
-    if not TOKEN:
-        print("❌ ERROR: DISCORD_TOKEN is missing in Railway Variables.")
-    else:
-        # Launch silent web server in background
-        Thread(target=run_production_server, daemon=True).start()
-        # Launch Bot
-        bot.run(TOKEN)
+        # For demonstration: generate a placeholder image using AI (text-based image generation)
+        print(f"DEBUG: Attempting to generate image for prompt: {prompt}")
+        image_description = await asyncio.to_thread(
+            g4f.ChatCompletion.create,
+            model=g4f.models.gpt_3_5_turbo, # Using a fast model for generating image concept
+            messages=[
+                {"role": "system", "content": "Describe a simple, visually interesting image based on the user's prompt, suitable for a logo or abstract art. Keep it brief."},
+                {"role": "user", "content": prompt}
+            ]
+        )
+        # Instead of a real image, we'll return a textual description.
+        # In a real bot, you'd replace this with actual image data.
+        return f"http://googleusercontent.com/image_generation_content/1
